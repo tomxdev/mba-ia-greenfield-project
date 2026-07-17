@@ -37,6 +37,12 @@ describe('Database migrations (integration)', () => {
       ),
       dataSource.query(`DROP TABLE IF EXISTS "migrations" CASCADE`),
     ]);
+    // DROP TABLE does not drop the enum type owned by verification_tokens.type —
+    // without this, re-running this suite against a previously migrated DB fails
+    // with "type verification_tokens_type_enum already exists".
+    await dataSource.query(
+      `DROP TYPE IF EXISTS "verification_tokens_type_enum" CASCADE`,
+    );
   });
 
   afterAll(async () => {
