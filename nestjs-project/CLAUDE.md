@@ -34,6 +34,10 @@ docker compose exec nestjs-api npm run start:dev
 Services:
 - `nestjs-api` — NestJS API, port `3000`
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `mailpit` — SMTP test server, ports `1025` (SMTP) / `8025` (web UI)
+- `minio` — S3-compatible object storage, ports `9000` (API) / `9001` (console), used for video files and thumbnails
+- `redis` — BullMQ's job queue backend, port `6379`
+- `video-worker` — standalone Node process (no HTTP server) that consumes the video-processing queue and runs FFmpeg; built from `Dockerfile.worker`, not `Dockerfile.dev`
 
 All verification and teardown commands run on the **host machine**:
 
@@ -148,6 +152,32 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
+
+## Video Upload & Processing
+
+The `videos/` module (`src/videos/`) handles video creation, multipart upload, and playback. It depends on `storage/` (MinIO client wrapper, `src/storage/storage.service.ts`) and a dedicated queue module (`src/videos/videos-queue.module.ts`), and hands off processing to a standalone worker process (`src/worker/`).
+
+### Upload flow (client-driven multipart, never proxied through the API)
+
+The API never receives the video bytes — the client uploads directly to MinIO using presigned URLs, so a 10GB upload never ties up an API request:
+
+1. `POST /videos` — pre-registers the video as a `draft` owned by the caller's channel, calls `StorageService.initiateMultipartUpload` and returns the `uploadId`.
+2. `POST /videos/:id/upload-parts` — given a list of part numbers, returns one presigned `PUT` URL per part (`StorageService.presignedUploadPartUrl`). The client `PUT`s each part directly to MinIO.
+3. `POST /videos/:id/complete` — given `{ partNumber, etag }` pairs, calls `StorageService.completeMultipartUpload`, flips the video to `processing`, and enqueues a `process-video` job on the `video-processing` BullMQ queue (`VIDEO_PROCESSING_QUEUE` in `videos-queue.module.ts`).
+
+Object keys are prefixed by the video's `short_id` (a nanoid, not the DB `id`), e.g. `{shortId}/original.mp4` and `{shortId}/thumbnail.jpg` — this avoids depending on the DB-generated `id` before the row exists.
+
+### Worker (`src/worker/`)
+
+A separate NestJS application context (`NestFactory.createApplicationContext(WorkerModule)`, entrypoint `src/worker/main.ts`), run by the `video-worker` Compose service (`Dockerfile.worker`, which installs the real `ffmpeg`/`ffprobe` binaries — `nestjs-api`'s image does not have them). `VideoProcessor` (`@Processor(VIDEO_PROCESSING_QUEUE)`, extends `WorkerHost`) consumes `process-video` jobs: downloads the original from storage, runs `ffprobe` for duration/metadata, generates a thumbnail via `fluent-ffmpeg`'s `.screenshots()`, uploads the thumbnail, and sets the video to `ready`. The queue's `defaultJobOptions` (`attempts: 8`, exponential backoff from 3s) apply; the `@OnWorkerEvent('failed')` handler only marks the video `error` (with `processing_error` populated) once `job.attemptsMade` reaches the configured attempt limit — earlier attempts are silently retried by BullMQ.
+
+### Playback
+
+`GET /videos/:id` returns video details (status, duration, processing error). `GET /videos/:shortId/stream` and `GET /videos/:shortId/download` both require `status: ready` (409 `VIDEO_NOT_READY` otherwise) and respond with a `302` redirect to a presigned MinIO read URL — `stream` with no override (inline playback, native `Range`/`206` support from MinIO), `download` with `response-content-disposition: attachment`. All three endpoints are open to any authenticated user, not just the video's owner.
+
+### Status lifecycle
+
+`draft → processing → ready | error`, stored on `Video.status` (`src/videos/entities/video.entity.ts`). Draft is set on `POST /videos`; processing on upload completion; ready/error is set exclusively by the worker.
 
 ## Code Conventions
 
