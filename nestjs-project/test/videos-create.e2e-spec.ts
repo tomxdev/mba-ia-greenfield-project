@@ -8,7 +8,25 @@ import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
 import { DomainExceptionFilter } from '../src/common/filters/domain-exception.filter';
 import { ValidationExceptionFilter } from '../src/common/filters/validation-exception.filter';
+import type { MailService } from '../src/mail/mail.service';
 import { cleanAllTables } from '../src/test/create-test-data-source';
+
+interface LoginResponseBody {
+  access_token: string;
+  refresh_token: string;
+}
+
+interface CreateVideoResponseBody {
+  id: string;
+  shortId: string;
+  status: string;
+  uploadId: string;
+  channelId: string;
+}
+
+interface ErrorResponseBody {
+  error: string;
+}
 
 describe('videos-create', () => {
   let app: INestApplication<App>;
@@ -53,12 +71,15 @@ describe('videos-create', () => {
     password = 'password123',
   ): Promise<string> {
     const authService = app.get(AuthService);
-    const mailServiceInstance = (authService as any).mailService;
+    const mailServiceInstance = (
+      authService as unknown as { mailService: MailService }
+    ).mailService;
     let capturedToken = '';
     jest
       .spyOn(mailServiceInstance, 'sendConfirmationEmail')
-      .mockImplementationOnce(async (_e: string, _n: string, t: string) => {
+      .mockImplementationOnce((_e: string, _n: string, t: string) => {
         capturedToken = t;
+        return Promise.resolve();
       });
     await request(app.getHttpServer())
       .post('/auth/register')
@@ -77,7 +98,7 @@ describe('videos-create', () => {
     const res = await request(app.getHttpServer())
       .post('/auth/login')
       .send({ email, password });
-    return res.body.access_token as string;
+    return (res.body as LoginResponseBody).access_token;
   }
 
   it('1.1 cria-video-com-sucesso', async () => {
@@ -89,11 +110,12 @@ describe('videos-create', () => {
       .send({ title: 'My video', fileName: 'movie.mp4', fileSizeBytes: 1024 })
       .expect(201);
 
-    expect(res.body.id).toEqual(expect.any(String));
-    expect(res.body.shortId).toEqual(expect.any(String));
-    expect(res.body.status).toBe('draft');
-    expect(res.body.uploadId).toEqual(expect.any(String));
-    expect(res.body.channelId).toEqual(expect.any(String));
+    const body = res.body as CreateVideoResponseBody;
+    expect(body.id).toEqual(expect.any(String));
+    expect(body.shortId).toEqual(expect.any(String));
+    expect(body.status).toBe('draft');
+    expect(body.uploadId).toEqual(expect.any(String));
+    expect(body.channelId).toEqual(expect.any(String));
   });
 
   it('1.2 rejeita-arquivo-acima-de-10gb', async () => {
@@ -109,7 +131,7 @@ describe('videos-create', () => {
       })
       .expect(413);
 
-    expect(res.body.error).toBe('FILE_TOO_LARGE');
+    expect((res.body as ErrorResponseBody).error).toBe('FILE_TOO_LARGE');
   });
 
   it('1.3 rejeita-sem-autenticacao', async () => {

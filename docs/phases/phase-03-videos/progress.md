@@ -5,14 +5,20 @@
 
 ### Final verification
 - Unit + integration suite: 158/158 passing (`docker compose exec nestjs-api npm test -- --runInBand`)
-- E2E suite: 63/63 passing (`docker compose exec nestjs-api npm run test:e2e`)
+- E2E suite: 63/63 passing (`docker compose exec nestjs-api npm run test:e2e -- --runInBand`)
 - Type-check: `npx tsc --noEmit` exits 0
-- Lint: `npm run lint` — 181 pre-existing errors remain (documented debt from Fases 01-02, none introduced by phase-03-videos scope; see "Regression found and fixed" below for the one real production-code lint error that was fixed)
+- Lint: `npm run lint` — 150 errors remain, all pre-existing in 11 Fase 01-02 files never touched by phase-03-videos (`auth.e2e-spec.ts`, `auth.service.spec.ts`, `auth.service.integration-spec.ts`, `channels.service.ts`, `channels.service.spec.ts`, `domain-exception.filter.spec.ts`, `validation-exception.filter.spec.ts`, `env.validation.integration-spec.ts`, `mail.service.integration-spec.ts`, `create-test-data-source.ts`, `users.service.integration-spec.ts`) — documented as known debt, out of scope for this phase. Zero errors in any phase-03-videos file.
 - `docker compose ps`: db, mailpit, minio, redis all `healthy`; nestjs-api and video-worker both `Up`
 
 ### Regression found and fixed during final verification
 - Adding `@OneToMany(() => Video, ...)` to `Channel` (SI-03.3) broke TypeORM metadata building for every Fase 01-02 test file that builds its own local `ALL_ENTITIES` array without `Video` — TypeORM requires every entity reachable via a relation to be registered in the DataSource's `entities` list, even when the test doesn't touch `Video` directly. Fixed by adding `Video` to the `ALL_ENTITIES`/entity-list constant in 10 files: `channels/entities/channel.entity.integration-spec.ts`, `channels/channels.service.integration-spec.ts`, `channels/channels.module.spec.ts`, `auth/auth.module.spec.ts`, `auth/auth.service.integration-spec.ts`, `auth/entities/refresh-token.entity.integration-spec.ts`, `auth/entities/verification-token.entity.integration-spec.ts`, `users/users.module.spec.ts`, `users/users.service.integration-spec.ts`, `users/entities/user.entity.integration-spec.ts`, and `database/migrations.integration-spec.ts`.
 - `src/worker/video-processor.ts`'s `ffprobe` promise wrapper rejected with fluent-ffmpeg's untyped callback `err` directly, tripping `@typescript-eslint/prefer-promise-reject-errors` (the type isn't provably `Error`). Fixed with an `err instanceof Error ? err : new Error(String(err))` guard — behavior-neutral, satisfies the rule.
+
+### Follow-up: lint debt in phase-03-videos E2E specs (post-merge fix)
+- `npm run lint` had 181 errors after the initial merge — 150 pre-existing (Fases 01-02) + 32 introduced by this phase's own `test/videos-{create,upload-parts,playback}.e2e-spec.ts`, which violated the Definition of Done. Root cause: `res.body` (supertest) is typed `any`, and the shared `(authService as any).mailService` cast + an `async` mock callback with no `await` tripped `@typescript-eslint/no-unsafe-assignment`, `no-unsafe-member-access`, and `require-await`.
+- Fixed in all 3 files by: (1) declaring per-endpoint response-shape interfaces (`LoginResponseBody`, `CreateVideoResponseBody`, `UploadPartsResponseBody`, `CompleteResponseBody`, `ErrorResponseBody`) and casting `res.body as <Interface>` once instead of accessing properties directly off the untyped body; (2) replacing `(authService as any).mailService` with `(authService as unknown as { mailService: MailService }).mailService`, which resolves to a properly typed value instead of `any`; (3) dropping `async` from the `mockImplementationOnce` callback and returning `Promise.resolve()` explicitly (no behavior change, satisfies `require-await`); (4) typing the BullMQ `Queue`/`getQueueToken` generic as `Queue<{ videoId: string }>` in `videos-upload-parts.e2e-spec.ts` instead of leaving job `.data` untyped.
+- All changes are type-only — zero runtime behavior difference — confirmed by rerunning the 3 specs (`--runInBand`, 11/11 passing) plus the full unit/integration (158/158) and E2E (63/63) suites after the fix. `npm run lint` now reports exactly the 150 pre-existing errors, 0 in phase-03-videos files.
+- Pre-existing `auth.e2e-spec.ts` (Fase 02, not touched) has the identical `any`-unsafe pattern and was intentionally left alone — out of scope for this phase per CLAUDE.md's Scope Limits.
 
 ### SI-03.1 — Infra: object storage e fila no Compose + configs
 - **Status:** completed
