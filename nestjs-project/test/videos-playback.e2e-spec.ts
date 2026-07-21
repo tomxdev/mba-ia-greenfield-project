@@ -10,10 +10,32 @@ import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
 import { DomainExceptionFilter } from '../src/common/filters/domain-exception.filter';
 import { ValidationExceptionFilter } from '../src/common/filters/validation-exception.filter';
+import type { MailService } from '../src/mail/mail.service';
 import { cleanAllTables } from '../src/test/create-test-data-source';
 import { Video, VideoStatus } from '../src/videos/entities/video.entity';
 
 const FIXTURE_PATH = path.join(__dirname, 'fixtures/sample.mp4');
+
+interface LoginResponseBody {
+  access_token: string;
+  refresh_token: string;
+}
+
+interface CreateVideoResponseBody {
+  id: string;
+  shortId: string;
+  status: string;
+  uploadId: string;
+  channelId: string;
+}
+
+interface UploadPartsResponseBody {
+  urls: Record<string, string>;
+}
+
+interface ErrorResponseBody {
+  error: string;
+}
 
 async function waitForStatus(
   dataSource: DataSource,
@@ -76,12 +98,15 @@ describe('videos-playback', () => {
     password = 'password123',
   ): Promise<string> {
     const authService = app.get(AuthService);
-    const mailServiceInstance = (authService as any).mailService;
+    const mailServiceInstance = (
+      authService as unknown as { mailService: MailService }
+    ).mailService;
     let capturedToken = '';
     jest
       .spyOn(mailServiceInstance, 'sendConfirmationEmail')
-      .mockImplementationOnce(async (_e: string, _n: string, t: string) => {
+      .mockImplementationOnce((_e: string, _n: string, t: string) => {
         capturedToken = t;
+        return Promise.resolve();
       });
     await request(app.getHttpServer())
       .post('/auth/register')
@@ -100,7 +125,7 @@ describe('videos-playback', () => {
     const res = await request(app.getHttpServer())
       .post('/auth/login')
       .send({ email, password });
-    return res.body.access_token as string;
+    return (res.body as LoginResponseBody).access_token;
   }
 
   async function createReadyVideo(accessToken: string): Promise<{
@@ -116,15 +141,16 @@ describe('videos-playback', () => {
         fileSizeBytes: 1717,
       })
       .expect(201);
-    const videoId = createRes.body.id as string;
-    const shortId = createRes.body.shortId as string;
+    const createBody = createRes.body as CreateVideoResponseBody;
+    const videoId = createBody.id;
+    const shortId = createBody.shortId;
 
     const partsRes = await request(app.getHttpServer())
       .post(`/videos/${videoId}/upload-parts`)
       .set('Authorization', `Bearer ${accessToken}`)
       .send({ partNumbers: [1] })
       .expect(200);
-    const partUrl = partsRes.body.urls['1'] as string;
+    const partUrl = (partsRes.body as UploadPartsResponseBody).urls['1'];
 
     const fixtureBuffer = await fs.readFile(FIXTURE_PATH);
     const putResponse = await fetch(partUrl, {
@@ -182,14 +208,14 @@ describe('videos-playback', () => {
         fileSizeBytes: 1717,
       })
       .expect(201);
-    const shortId = createRes.body.shortId as string;
+    const shortId = (createRes.body as CreateVideoResponseBody).shortId;
 
     const res = await request(app.getHttpServer())
       .get(`/videos/${shortId}/stream`)
       .set('Authorization', `Bearer ${accessToken}`)
       .expect(409);
 
-    expect(res.body.error).toBe('VIDEO_NOT_READY');
+    expect((res.body as ErrorResponseBody).error).toBe('VIDEO_NOT_READY');
   });
 
   it('1.4 get-video-inexistente-404', async () => {
@@ -200,6 +226,6 @@ describe('videos-playback', () => {
       .set('Authorization', `Bearer ${accessToken}`)
       .expect(404);
 
-    expect(res.body.error).toBe('VIDEO_NOT_FOUND');
+    expect((res.body as ErrorResponseBody).error).toBe('VIDEO_NOT_FOUND');
   });
 });
