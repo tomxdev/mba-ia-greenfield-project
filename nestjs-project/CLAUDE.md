@@ -88,14 +88,21 @@ curl http://localhost:3000
 
 ### Test execution
 
-Integration and e2e suites share a single test database. They **must** be run with `--runInBand`:
+Run both suites with `--runInBand`:
 
 ```bash
 docker compose exec nestjs-api npm test -- --runInBand
-docker compose exec nestjs-api npm run test:e2e   # already configured
+docker compose exec nestjs-api npm run test:e2e -- --runInBand
 ```
 
-Parallel execution causes FK violations, deadlocks, and cross-suite contamination because suites truncate or seed shared tables concurrently.
+Parallel execution causes FK violations and cross-suite contamination because suites truncate or seed shared tables concurrently.
+
+**Test databases (isolated from the runtime DB).** Integration tests never touch the runtime `streamtube` database used by the live `nestjs-api` and `video-worker` containers — a schema-owning test dropping tables there would deadlock against the worker's open connections. Instead, a Jest `globalSetup` (`src/test/global-setup.ts`) provisions dedicated databases once per run:
+
+- `DB_TEST_NAME` (`streamtube_test`) — shared by the `synchronize: true` integration specs (auth, users, channels, storage, entity constraints).
+- `DB_MIGRATIONS_TEST_NAME` (`streamtube_test_migrations`) — owned solely by `migrations.integration-spec.ts`, which drops and recreates every table. Its own database keeps those destructive operations from making the suite order-dependent.
+
+The **one** exception is `worker/video-processor.integration-spec.ts`: it enqueues a real job and waits for the live `video-worker` container to process it, so it must share the worker's runtime `streamtube` database (`database: DB_NAME`) — but with `synchronize: false`, so it only reads/writes the existing schema and never mutates the shared live database. E2E tests likewise run against the runtime `streamtube` via `AppModule`.
 
 During active development, run only the tests related to the file being changed (`npm test -- path/to/file.spec.ts`). Before declaring a task done, run the full suite — see the global `CLAUDE.md` → "Definition of Done (Technical)".
 
@@ -125,6 +132,7 @@ These settings are required in `package.json` (jest config) and `test/jest-e2e.j
 
 - `setupFiles: ["dotenv/config"]` — without this, `.env` is not loaded inside the Jest process. `DB_HOST`, `JWT_SECRET`, etc. fall back to undefined or to the host's `localhost`, breaking container-to-container DNS.
 - `testRegex: '.*\\.(spec|integration-spec)\\.ts$'` — covers both unit (`*.spec.ts`) and integration (`*.integration-spec.ts`) suffixes.
+- `globalSetup: "<rootDir>/test/global-setup.ts"` — creates the dedicated integration-test databases (`streamtube_test`, `streamtube_test_migrations`) before any suite runs. `globalSetup` runs in its own context and does NOT execute `setupFiles`, so it loads `.env` itself.
 
 Do not add new test-file suffixes; if a new test type is needed, update the regex deliberately.
 
