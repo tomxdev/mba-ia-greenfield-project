@@ -96,6 +96,7 @@
     "testEnvironment": "node",
     "setupFiles": [
       "dotenv/config"
-    ]
+    ],
+    "globalSetup": "<rootDir>/test/global-setup.ts"
   }
 }

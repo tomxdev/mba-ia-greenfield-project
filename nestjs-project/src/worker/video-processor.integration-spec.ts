@@ -43,7 +43,20 @@ describe('VideoProcessor (integration)', () => {
   let queue: Queue;
 
   beforeAll(async () => {
-    dataSource = createTestDataSource([User, Channel, Video]);
+    // This test exercises the LIVE `video-worker` container end-to-end: it
+    // enqueues a real job and waits for the worker to process it. The worker
+    // reads/writes the runtime `streamtube` database, so this test must share
+    // that same database (not the isolated `streamtube_test`) — otherwise the
+    // worker would never see the rows this test creates.
+    //
+    // `synchronize: false` on purpose: the runtime database is already fully
+    // migrated (via `npm run migration:run`) and is shared with the live app.
+    // A test must never mutate that shared schema — it only reads/writes rows
+    // through the existing tables.
+    dataSource = createTestDataSource([User, Channel, Video], {
+      database: process.env.DB_NAME ?? 'streamtube',
+      synchronize: false,
+    });
     await dataSource.initialize();
     userRepository = dataSource.getRepository(User);
     channelRepository = dataSource.getRepository(Channel);
