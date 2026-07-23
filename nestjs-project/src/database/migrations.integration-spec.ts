@@ -24,6 +24,12 @@ describe('Database migrations (integration)', () => {
     dataSource = createTestDataSource(
       [User, Channel, RefreshToken, VerificationToken, Video],
       {
+        // Dedicated database owned solely by this spec — it drops and recreates
+        // every table, so it must not share the `streamtube_test` database used
+        // by the synchronize-based specs (that would make the suite order- and
+        // state-dependent). Provisioned by src/test/global-setup.ts.
+        database:
+          process.env.DB_MIGRATIONS_TEST_NAME ?? 'streamtube_test_migrations',
         synchronize: false,
         migrations: [
           CreateUsersAndChannels1775687773260,
@@ -35,12 +41,14 @@ describe('Database migrations (integration)', () => {
 
     await dataSource.initialize();
 
-    await Promise.all([
-      ...MANAGED_TABLES.map((table) =>
-        dataSource.query(`DROP TABLE IF EXISTS "${table}" CASCADE`),
-      ),
-      dataSource.query(`DROP TABLE IF EXISTS "migrations" CASCADE`),
-    ]);
+    // Drop sequentially (not via Promise.all): concurrent `DROP TABLE ... CASCADE`
+    // on FK-linked tables can deadlock against each other as they grab locks on
+    // referenced tables in different orders. This runs against the dedicated
+    // `streamtube_test` database (isolated from the live stack), so there is no
+    // contention with the running worker.
+    for (const table of [...MANAGED_TABLES, 'migrations']) {
+      await dataSource.query(`DROP TABLE IF EXISTS "${table}" CASCADE`);
+    }
     // DROP TABLE does not drop enum types owned by table columns —
     // without this, re-running this suite against a previously migrated DB fails
     // with "type ... already exists".
@@ -51,8 +59,9 @@ describe('Database migrations (integration)', () => {
   });
 
   afterAll(async () => {
-    // The second test undoes the last migration, leaving token tables missing.
-    // Re-apply so the shared DB is fully migrated when subsequent suites run.
+    // The revert test undoes the last migration, leaving the videos table
+    // missing. Re-apply so the test database is fully migrated when subsequent
+    // integration suites (which share `streamtube_test`) run.
     await dataSource.runMigrations();
     await dataSource.destroy();
   });
